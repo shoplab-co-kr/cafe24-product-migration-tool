@@ -5,12 +5,17 @@
   "repository": "https://github.com/shoplab-co-kr/cafe24-product-migration-tool.git",
   "author": "",
   "license": "MIT",
+  "scripts": {
+    "start:dev": "yarn ts-node ./src",
+    "build": "yarn tsc",
+    "start": "node ."
+  },
   "dependencies": {
-    "dotenv": "^16.0.1",
+    "inquirer": "^8.0.0",
     "puppeteer": "^15.5.0"
   },
   "devDependencies": {
-    "@types/dotenv": "^8.2.0",
+    "@types/inquirer": "^8.2.1",
     "@types/node": "^18.0.6",
     "@types/puppeteer": "^5.4.6",
     "@typescript-eslint/eslint-plugin": "^5.30.7",
