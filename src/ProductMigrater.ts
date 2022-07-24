@@ -2,6 +2,7 @@ import puppeteer from "puppeteer";
 import inquirer from "inquirer";
 import fs from "fs";
 import path from "path";
+import mkdirp from "mkdirp";
 import { v4 as uuid } from "uuid";
 
 interface Cafe24Account {
@@ -23,12 +24,118 @@ interface MigrationJSONData {
 class ProductMigrater {
   constructor() {}
 
+  /**
+   * Cafe24 로그인 페이지 URL
+   */
   private readonly CAFE24_EC_LOGIN_URL = "https://eclogin.cafe24.com/Shop/";
+
+  /**
+   * Puppeteer 기본 user agent
+   */
   private readonly BROWSER_USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36";
+
+  /**
+   * Puppeteer 기본 대기옵션
+   */
   private readonly DEFAULT_WAIT_OPTIONS: puppeteer.WaitForOptions = {
     waitUntil: "networkidle2",
   };
+
+  private readonly MIGRATION_DATA_PATH = path.join(".", ".migration");
+
+  private readonly MIGRATION_FORM_ITEM = [
+    "product_code",
+    "ma_product_code",
+    "is_display",
+    "is_selling",
+    "category_no",
+    "display_group_3",
+    "display_group_2",
+    "product_name",
+    "eng_product_name",
+    "item_name",
+    "purchase_prd_name",
+    "prd_model",
+    "p_summary_contents",
+    "p_pr_contents",
+    "pa_detail_info",
+    "mobile_detail_info_display",
+    "mobile_detail_info",
+    "product_tag",
+    "product_tax_type",
+    "product_custom",
+    "product_buy",
+    "prd_price_org",
+    "product_price",
+    "product_price_type",
+    "product_price_content",
+    "order_limit_type",
+    "product_min",
+    "product_max",
+    "mileage_value",
+    "mileage_type",
+    "common_event_exposure",
+    "is_adult",
+    "has_option",
+    "option_type",
+    "item_listing_type",
+    "option_set_name",
+    "option_value_serial",
+    "option_display_type_serial",
+    "option_button_image",
+    "option_color",
+    "necessary",
+    "soldout_display_text",
+    "option_add",
+    "add_option_name",
+    "add_option_tf_serial",
+    "text_length",
+    "image_big",
+    "image_medium",
+    "image_tiny",
+    "image_small",
+    "image_add",
+    "manufacturer_code",
+    "supplier_id",
+    "brand_code",
+    "trend_code",
+    "classification_code",
+    "print_date",
+    "release_date",
+    "use_expiration_date",
+    "expiration_date",
+    "origin_place_no",
+    "volume_size_serial",
+    "payment_info",
+    "shipping_info",
+    "exchange_info",
+    "cs_info",
+    "use_individual_ship_config",
+    "delivery_method",
+    "delvtype",
+    "delivery_place",
+    "delivery_cost_prepaid",
+    "delivery_period",
+    "ship_type",
+    "ship_fee",
+    "use_store_pickup",
+    "product_weight",
+    "hscode",
+    "clearance_category_code",
+    "product_material",
+    "product_material_eng",
+    "cloth_fabric",
+    "seo_search_engine_exposure",
+    "seo_title",
+    "seo_meta_author",
+    "seo_meta_description",
+    "meta_tag",
+    "seo_alt_tag",
+    "individual_payment_method",
+    "supplier_trading_type_code",
+    "product_memo",
+  ];
 
   /**
    * 타임스템프를 반환하는 함수
@@ -39,6 +146,33 @@ class ProductMigrater {
       .toISOString()
       .replace("T", " ")
       .replace(/\..*/, "");
+
+  /**
+   * 디렉토리 내 가장 최신 파일을 얻는 함수
+   * @param dir
+   * @returns
+   */
+  private getMostRecentFile = (dir: string) => {
+    const files = fs.readdirSync(dir);
+    let j = files.length;
+    for (let i = 0; i < j; i++) {
+      if (
+        !files[i].match(/^[a-z|A-Z|0-9]{1}.+\..+$/) ||
+        !fs.lstatSync(path.join(dir, files[i])).isFile()
+      ) {
+        files.splice(i, 1);
+        j -= 1;
+      }
+    }
+
+    files
+      .map((file) => ({
+        file,
+        mtime: fs.lstatSync(path.join(dir, file)).mtime,
+      }))
+      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
+    return files.length ? files[0] : undefined;
+  };
 
   /**
    * Cafe24 계정을 입력 받아 반환하는 함수
@@ -141,6 +275,30 @@ class ProductMigrater {
     await page.type(selector, text);
   };
 
+  private waitForDownload = async (browser: puppeteer.Browser) => {
+    const dmPage = await browser.newPage();
+    await dmPage.goto("chrome://downloads/");
+
+    await dmPage.bringToFront();
+    await dmPage.waitForFunction(
+      () => {
+        try {
+          const donePath = document
+            .querySelector("downloads-manager")!
+            .shadowRoot!.querySelector("#frb0")!
+            .shadowRoot!.querySelector("#pauseOrResume")!;
+          if ((donePath as HTMLButtonElement).innerText != "Pause") {
+            return true;
+          }
+        } catch {
+          //
+        }
+      },
+      { timeout: 0 }
+    );
+    console.log("Download finished");
+  };
+
   /**
    * Cafe24 로그인을 시도하는 함수
    * @param account
@@ -192,38 +350,21 @@ class ProductMigrater {
    * 상품백업함수
    */
   runBackupProduct = async (account: Cafe24Account) => {
-    // 상품백업 옵션 선택
-    const backupOptions = await inquirer.prompt([
-      {
-        type: "list",
-        name: "data-form",
-        message: "상품백업 액셀파일 양식선택",
-        choices: [
-          "1. 기본양식",
-          "2. 에디봇 기본양식",
-          "3. 옵션/재고 초기화 양식",
-        ],
-        filter: (val: string) => val.split(". ")[1],
-      },
-      {
-        type: "checkbox",
-        name: "data-option",
-        message: "옵션선택",
-        choices: ["상품명 HTML 태그 삭제"],
-      },
-    ]);
-
     // Cafe24 로그인 브라우저 생성
     const cafe24Browser = await this.runCafe24Login(account);
     if (!cafe24Browser) throw Error("failed cafe24 login.");
     const { browser, page } = cafe24Browser;
 
     // 이전 마이그레이션 정보 JSON 파싱
+    if (!fs.existsSync(this.MIGRATION_DATA_PATH))
+      mkdirp(this.MIGRATION_DATA_PATH).catch(() => {
+        throw Error("Can not created migration data folder.");
+      });
     let userMigrationData: MigrationJSONData;
     try {
       userMigrationData = JSON.parse(
         fs.readFileSync(
-          path.join("..", ".migration", `${account.id}.json`),
+          path.join(this.MIGRATION_DATA_PATH, `${account.id}.json`),
           "utf-8"
         )
       );
@@ -244,52 +385,117 @@ class ProductMigrater {
     await page.goto(
       `https://${account.id}.cafe24.com/disp/admin/product/productmanage`
     );
-    const popup = await this.clickToOpenPopup(
+    const downloadPopup = await this.clickToOpenPopup(
       browser,
       page,
       ".setting .eExcelCreateRequestPopUp"
     );
-    const popupClient = await popup.target().createCDPSession();
-    popup.on("dialog", async (dialog) => {
+
+    const downloadPopupClient = await downloadPopup.target().createCDPSession();
+    downloadPopup.on("dialog", async (dialog) => {
       await dialog.accept();
     });
-    await popupClient.send("Page.setDownloadBehavior", {
+    await downloadPopupClient.send("Page.setDownloadBehavior", {
       behavior: "allow",
-      downloadPath: ".",
+      downloadPath: this.MIGRATION_DATA_PATH,
     });
 
-    await this.setSelectBoxOption(
-      popup,
-      "#aManagesList",
-      backupOptions["data-form"]
+    // 엑셀 다운로드 양식관리에 마이그레이션용양식 추가
+    await downloadPopup.waitForSelector(
+      "#QA_common_password1 #aManagesList option"
     );
-    await this.typeToElement(popup, "#Password", userMigrationData.password);
+    const excelFormOptions = await downloadPopup.$$eval(
+      "#QA_common_password1 #aManagesList option",
+      (e) => e.map((x) => x.getAttribute("value"))
+    );
+    if (excelFormOptions.indexOf("마이그레이션용양식") === -1) {
+      const formSettingPopup = await this.clickToOpenPopup(
+        browser,
+        downloadPopup,
+        "#QA_common_password1 .excelManage"
+      );
+      formSettingPopup.on("dialog", async (dialog) => {
+        dialog.accept();
+        await formSettingPopup.close();
+      });
+      await this.setSelectBoxOption(
+        formSettingPopup,
+        "#QA_common_download1 #aManagesList",
+        "newManage"
+      );
+      await formSettingPopup.waitForNavigation();
+
+      await this.typeToElement(
+        formSettingPopup,
+        "#sManageNewName",
+        "마이그레이션용양식"
+      );
+
+      for (let item of this.MIGRATION_FORM_ITEM) {
+        await formSettingPopup.click(`option[data-id="${item}"]`);
+        await formSettingPopup.click(".mController .icoRight");
+      }
+      await formSettingPopup.click("#ManageDataSave");
+    }
+
+    await downloadPopup.waitForTimeout(1000);
+    await this.setSelectBoxOption(
+      downloadPopup,
+      "#aManagesList",
+      "마이그레이션용양식"
+    );
+    await downloadPopup.waitForTimeout(1000);
     await this.typeToElement(
-      popup,
+      downloadPopup,
+      "#Password",
+      userMigrationData.password
+    );
+    await this.typeToElement(
+      downloadPopup,
       "#PasswordConfirm",
       userMigrationData.password
     );
 
-    await this.setCheckBoxValue(
-      popup,
-      "#data_option",
-      backupOptions["data-option"].indexOf("상품명 HTML 태그 삭제") !== -1
-    );
-    // await this.clickElement(popup, "#QA_common_password1 .excelSubmit");
-    await popup.waitForSelector(
+    await this.setCheckBoxValue(downloadPopup, "#data_option", true);
+    await this.clickElement(downloadPopup, "#QA_common_password1 .excelSubmit");
+    await downloadPopup.waitForSelector(
       "#QA_common_password2 tbody tr:nth-of-type(1) .eModal:nth-of-type(1)"
     );
-    await popup.click(
+    await downloadPopup.click(
       "#QA_common_password2 tbody tr:nth-of-type(1) .eModal:nth-of-type(1)",
       { delay: 2000 }
     );
     await this.typeToElement(
-      popup,
+      downloadPopup,
       "#ConfirmLayer #password",
       userMigrationData.password
     );
-    await popup.waitForSelector("#excel_download");
-    await popup.click("#excel_download");
+    await downloadPopup.waitForSelector("#excel_download");
+    await downloadPopup.click("#excel_download");
+    await downloadPopup
+      .waitForNetworkIdle()
+      .then(async () => {
+        const fileName = this.getMostRecentFile(this.MIGRATION_DATA_PATH);
+        if (!fileName) throw Error("Failed file download...");
+        fs.renameSync(
+          path.join(this.MIGRATION_DATA_PATH, fileName),
+          path.join(this.MIGRATION_DATA_PATH, `${account.id}_${fileName}`)
+        );
+        console.log("Success donwload file!");
+
+        await downloadPopup.close();
+        await page.close();
+        await browser.close();
+      })
+      .catch((e) => {
+        Promise.all([
+          downloadPopup.close(),
+          page.close(),
+          browser.close(),
+        ]).then(() => {
+          throw Error("Failed file download...");
+        });
+      });
   };
 }
 
