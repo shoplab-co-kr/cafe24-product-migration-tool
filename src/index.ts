@@ -15,14 +15,17 @@ import productMigrater from "./ProductMigrater";
     .then(async (answers) => {
       switch (answers.mode) {
         case 0:
-          await productMigrater.runBackupProduct(
-            await productMigrater.getCafe24Account()
-          );
+          const account = await productMigrater.getCafe24Account();
+          let condition = await productMigrater.runCafe24Login(account);
+          if (condition)
+            condition = await productMigrater.runPasingCafe24Category(account);
+
           break;
         case 1:
           break;
         default:
           throw Error("invaild mode.");
       }
+      await productMigrater.closeBrowser();
     });
 })();

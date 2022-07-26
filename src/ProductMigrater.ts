@@ -1,9 +1,9 @@
-import puppeteer from "puppeteer";
+import CustomPuppeteer from "./CustomPuppeteer";
 import inquirer from "inquirer";
-import fs from "fs";
 import path from "path";
+import fs from "fs";
+import { Logger } from "tslog";
 import mkdirp from "mkdirp";
-import { v4 as uuid } from "uuid";
 
 interface Cafe24Account {
   id: string;
@@ -14,33 +14,35 @@ interface Cafe24AccountGetter {
   (): Promise<Cafe24Account>;
 }
 
-interface MigrationJSONData {
-  default: Array<any>;
-  edibot: Array<any>;
-  reset: Array<any>;
-  password: string;
+interface Cafe24ProductCategory {
+  no: number;
+  title: string;
+  description: string;
+  showCategory: boolean;
+  showMainCategory: boolean;
+  showPC: boolean;
+  showMobile: boolean;
+  showSoldout: boolean;
+  showChildProduct: boolean;
+  productSector: string;
+  allowRobot: boolean;
+  seoTitle: string;
+  seoAuthor: string;
+  seoDescription: string;
+  seoKeywords: string;
+  childCategory: Array<Cafe24ProductCategory>;
 }
 
-class ProductMigrater {
-  constructor() {}
+interface Cafe24ProductCategoryParsingData {
+  dimension: number;
+  data: Cafe24ProductCategory;
+}
 
-  /**
-   * Cafe24 로그인 페이지 URL
-   */
-  private readonly CAFE24_EC_LOGIN_URL = "https://eclogin.cafe24.com/Shop/";
-
-  /**
-   * Puppeteer 기본 user agent
-   */
-  private readonly BROWSER_USER_AGENT =
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/85.0.4183.102 Safari/537.36";
-
-  /**
-   * Puppeteer 기본 대기옵션
-   */
-  private readonly DEFAULT_WAIT_OPTIONS: puppeteer.WaitForOptions = {
-    waitUntil: "networkidle2",
-  };
+class ProductMigrater extends CustomPuppeteer {
+  constructor() {
+    super();
+    this.START_TIMESTAMP = this.getTimestamp();
+  }
 
   private readonly MIGRATION_DATA_PATH = path.join(".", ".migration");
 
@@ -137,6 +139,14 @@ class ProductMigrater {
     "product_memo",
   ];
 
+  private readonly START_TIMESTAMP: string;
+
+  private readonly log = new Logger();
+  readonly printInfoLog = (label: string, msg: string) =>
+    this.log.info(`[${label}] : ${msg}`);
+  readonly printErrLog = (label: string, msg: string) =>
+    this.log.error(`[${label}] : ${msg}`);
+
   /**
    * 타임스템프를 반환하는 함수
    * @returns
@@ -148,30 +158,19 @@ class ProductMigrater {
       .replace(/\..*/, "");
 
   /**
-   * 디렉토리 내 가장 최신 파일을 얻는 함수
-   * @param dir
+   * 특정 계정의 마이그레이션데이터 저장 경로를 얻는 함수
+   * @param id
    * @returns
    */
-  private getMostRecentFile = (dir: string) => {
-    const files = fs.readdirSync(dir);
-    let j = files.length;
-    for (let i = 0; i < j; i++) {
-      if (
-        !files[i].match(/^[a-z|A-Z|0-9]{1}.+\..+$/) ||
-        !fs.lstatSync(path.join(dir, files[i])).isFile()
-      ) {
-        files.splice(i, 1);
-        j -= 1;
-      }
-    }
+  private getMigrationUserDirPath = (id: string) =>
+    path.join(this.MIGRATION_DATA_PATH, `${id}_${this.START_TIMESTAMP}`);
 
-    files
-      .map((file) => ({
-        file,
-        mtime: fs.lstatSync(path.join(dir, file)).mtime,
-      }))
-      .sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-    return files.length ? files[0] : undefined;
+  /**
+   * 브라우저를 종료하는 함수
+   */
+  closeBrowser = async () => {
+    const { browser } = await this.getPuppeteer();
+    await browser.close();
   };
 
   /**
@@ -194,308 +193,172 @@ class ProductMigrater {
   };
 
   /**
-   * 선택자 요소를 마우스 클릭하는 함수
-   * @param page
-   * @param selector
-   */
-  private clickElement = async (page: puppeteer.Page, selector: string) => {
-    await page.waitForSelector(selector);
-    await Promise.all([
-      page.click(selector),
-      page.waitForNavigation(this.DEFAULT_WAIT_OPTIONS),
-    ]);
-  };
-
-  /**
-   * 팝업 윈도우가 발생하는 선택자 요소를 마우스 클릭하는 함수
-   * @param browser
-   * @param page
-   * @param selector
-   */
-  private clickToOpenPopup = async (
-    browser: puppeteer.Browser,
-    page: puppeteer.Page,
-    selector: string
-  ) => {
-    await page.waitForSelector(selector);
-    await page.click(selector);
-    const popup: puppeteer.Page = await new Promise((x) =>
-      browser.once("targetcreated", (target) => x(target.page()))
-    );
-    return popup;
-  };
-
-  /**
-   * 셀렉트박스 요소의 옵션을 선택하는 함수
-   * @param page
-   * @param selector
-   */
-  private setSelectBoxOption = async (
-    page: puppeteer.Page,
-    selector: string,
-    option: string
-  ) => {
-    await page.waitForSelector(selector);
-    await page.select(selector, option);
-  };
-
-  /**
-   * 체크박스 요소의 값을 설정하는 함수
-   * @param page
-   * @param selector
-   * @param value
-   */
-  private setCheckBoxValue = async (
-    page: puppeteer.Page,
-    selector: string,
-    value: boolean
-  ) => {
-    const checkbox = await page.$(selector);
-    if (checkbox) {
-      const checkboxValue = (await (
-        await checkbox.getProperty("checked")
-      ).jsonValue()) as boolean;
-
-      if (checkboxValue !== value) await page.click(selector);
-    }
-  };
-
-  /**
-   * 선택자 요소에 인자로 전달된 텍스트를 키보드 입력하는 함수
-   * @param page
-   * @param selector
-   * @param text
-   */
-  private typeToElement = async (
-    page: puppeteer.Page,
-    selector: string,
-    text: string
-  ) => {
-    await page.waitForSelector(selector);
-    await page.type(selector, text);
-  };
-
-  private waitForDownload = async (browser: puppeteer.Browser) => {
-    const dmPage = await browser.newPage();
-    await dmPage.goto("chrome://downloads/");
-
-    await dmPage.bringToFront();
-    await dmPage.waitForFunction(
-      () => {
-        try {
-          const donePath = document
-            .querySelector("downloads-manager")!
-            .shadowRoot!.querySelector("#frb0")!
-            .shadowRoot!.querySelector("#pauseOrResume")!;
-          if ((donePath as HTMLButtonElement).innerText != "Pause") {
-            return true;
-          }
-        } catch {
-          //
-        }
-      },
-      { timeout: 0 }
-    );
-    console.log("Download finished");
-  };
-
-  /**
-   * Cafe24 로그인을 시도하는 함수
+   * Cafe24 로그인 시도 함수
    * @param account
    * @returns
    */
-  private runCafe24Login = async (account: Cafe24Account) => {
-    console.log(`puppeteer start: ${this.getTimestamp()}`);
-    console.log("start cafe24 login...");
+  runCafe24Login = async (account: Cafe24Account) => {
+    const logLabel = "runCafe24Login";
+    this.printInfoLog(logLabel, `Start cafe24 login - ${account.id}`);
 
-    const browser = await puppeteer.launch({
-      headless: false,
-    });
-    const page = await browser.newPage();
-    await page.setUserAgent(this.BROWSER_USER_AGENT);
-    await page.on("dialog", async (dialog) => {
-      await dialog.dismiss();
-      await page.keyboard.press("Escape");
-    });
+    const { browser, page } = await this.getPuppeteer();
 
     // Cafe24 EC 관리자 페이지 로그인 시도
-    await page.goto(this.CAFE24_EC_LOGIN_URL);
+    await page.goto("https://eclogin.cafe24.com/Shop/");
     await this.typeToElement(page, "#mall_id", account.id);
     await this.typeToElement(page, "#userpasswd", account.password);
-    await this.clickElement(page, "#frm_user > div > div.mButton > button");
+    await this.clickWithWait(page, "#frm_user > div > div.mButton > button");
 
+    if (
+      page.url() ===
+      "https://user.cafe24.com/comLogin/?action=comForce&req=hosting"
+    ) {
+      await page.waitForSelector("#iptBtnEm");
+      await page.click("#iptBtnEm");
+      await page.waitForNavigation();
+    }
+
+    let successFlag: boolean;
     if (
       page.url() ===
       `https://${account.id}.cafe24.com/disp/admin/shop1/mode/dashboard?`
     ) {
-      page.evaluate(function () {
-        (
-          window as any
-        ).NEW_PRO_MODE_MENU_NAGIVATION_GNB.onClickNewProModeDashboardModalClose();
-      });
-      await this.clickElement(
-        page,
-        ".changeModeToggle .ec-influencer-gnb-mode-change"
-      );
-      console.log(`Successed cafe24 Login : ${account.id}`);
-      return { browser, page };
+      await page.goto(`https://${account.id}.cafe24.com/admin/php/main.php`);
+      this.printInfoLog(logLabel, `Successed cafe24 login - ${account.id}`);
+      successFlag = true;
     } else {
-      await page.close();
-      await browser.close();
-      return undefined;
+      this.printErrLog(logLabel, `Failed cafe24 login - ${account.id}`);
+      successFlag = false;
     }
+
+    await page.close();
+    return successFlag;
   };
 
   /**
-   * 상품백업함수
+   * Cafe24 상품분류 파싱 시도 함수
+   * @param account
    */
-  runBackupProduct = async (account: Cafe24Account) => {
-    // Cafe24 로그인 브라우저 생성
-    const cafe24Browser = await this.runCafe24Login(account);
-    if (!cafe24Browser) throw Error("failed cafe24 login.");
-    const { browser, page } = cafe24Browser;
+  runPasingCafe24Category = async (account: Cafe24Account) => {
+    const logLabel = "runCafe24Login";
+    this.printInfoLog(
+      logLabel,
+      `Start parsing cafe24 category - ${account.id}`
+    );
 
-    // 이전 마이그레이션 정보 JSON 파싱
-    if (!fs.existsSync(this.MIGRATION_DATA_PATH))
-      mkdirp(this.MIGRATION_DATA_PATH).catch(() => {
-        throw Error("Can not created migration data folder.");
-      });
-    let userMigrationData: MigrationJSONData;
-    try {
-      userMigrationData = JSON.parse(
-        fs.readFileSync(
-          path.join(this.MIGRATION_DATA_PATH, `${account.id}.json`),
-          "utf-8"
-        )
-      );
-    } catch (e) {
-      userMigrationData = {
-        default: [],
-        edibot: [],
-        reset: [],
-        // password: Buffer.from(uuid(), "utf-8")
-        //   .toString("base64")
-        //   .substring(0, 16),
-        password: "test1234TEST",
-      };
-    }
+    const { browser, page } = await this.getPuppeteer();
 
-    // 상품목록 엑셀다운로드
-    console.log("Start download product excel file...");
+    // 상품분류 설정 페이지 접근
     await page.goto(
-      `https://${account.id}.cafe24.com/disp/admin/product/productmanage`
+      `https://${account.id}.cafe24.com/disp/admin/product/categorymanage`
     );
-    const downloadPopup = await this.clickToOpenPopup(
-      browser,
-      page,
-      ".setting .eExcelCreateRequestPopUp"
-    );
+    await page.waitForNetworkIdle();
 
-    const downloadPopupClient = await downloadPopup.target().createCDPSession();
-    downloadPopup.on("dialog", async (dialog) => {
-      await dialog.accept();
+    // 상품분류트리 확장
+    await page.waitForSelector("#eUnrollCategoryBtn");
+    await page.$eval("#eUnrollCategoryBtn", (ele: any) => {
+      ele.click();
     });
-    await downloadPopupClient.send("Page.setDownloadBehavior", {
-      behavior: "allow",
-      downloadPath: this.MIGRATION_DATA_PATH,
-    });
+    await page.waitForTimeout(100);
 
-    // 엑셀 다운로드 양식관리에 마이그레이션용양식 추가
-    await downloadPopup.waitForSelector(
-      "#QA_common_password1 #aManagesList option"
-    );
-    const excelFormOptions = await downloadPopup.$$eval(
-      "#QA_common_password1 #aManagesList option",
-      (e) => e.map((x) => x.getAttribute("value"))
-    );
-    if (excelFormOptions.indexOf("마이그레이션용양식") === -1) {
-      const formSettingPopup = await this.clickToOpenPopup(
-        browser,
-        downloadPopup,
-        "#QA_common_password1 .excelManage"
-      );
-      formSettingPopup.on("dialog", async (dialog) => {
-        dialog.accept();
-        await formSettingPopup.close();
+    try {
+      // 상품분류의 차수를 얻는 함수를 페이지 내에 선언
+      await page.evaluate(() => {
+        (window as any).getCategoryDimension = (_ele: any) => {
+          let i = 0;
+          let ele = (window as any).$(_ele);
+          while (!ele.hasClass("dynatree-container")) {
+            ele = ele.parent();
+            if (ele.attr("id").match(/^category-[0-9]+$/)) i += 1;
+          }
+          return i;
+        };
       });
-      await this.setSelectBoxOption(
-        formSettingPopup,
-        "#QA_common_download1 #aManagesList",
-        "newManage"
+
+      // 상품분류정보 파싱 시작
+      const categoryDatas: Array<Cafe24ProductCategory> = [];
+      const categoryElements = await page.$$(
+        `.dynatree-container li[id^="category-"]`
       );
-      await formSettingPopup.waitForNavigation();
-
-      await this.typeToElement(
-        formSettingPopup,
-        "#sManageNewName",
-        "마이그레이션용양식"
-      );
-
-      for (let item of this.MIGRATION_FORM_ITEM) {
-        await formSettingPopup.click(`option[data-id="${item}"]`);
-        await formSettingPopup.click(".mController .icoRight");
-      }
-      await formSettingPopup.click("#ManageDataSave");
-    }
-
-    await downloadPopup.waitForTimeout(1000);
-    await this.setSelectBoxOption(
-      downloadPopup,
-      "#aManagesList",
-      "마이그레이션용양식"
-    );
-    await downloadPopup.waitForTimeout(1000);
-    await this.typeToElement(
-      downloadPopup,
-      "#Password",
-      userMigrationData.password
-    );
-    await this.typeToElement(
-      downloadPopup,
-      "#PasswordConfirm",
-      userMigrationData.password
-    );
-
-    await this.setCheckBoxValue(downloadPopup, "#data_option", true);
-    await this.clickElement(downloadPopup, "#QA_common_password1 .excelSubmit");
-    await downloadPopup.waitForSelector(
-      "#QA_common_password2 tbody tr:nth-of-type(1) .eModal:nth-of-type(1)"
-    );
-    await downloadPopup.click(
-      "#QA_common_password2 tbody tr:nth-of-type(1) .eModal:nth-of-type(1)",
-      { delay: 2000 }
-    );
-    await this.typeToElement(
-      downloadPopup,
-      "#ConfirmLayer #password",
-      userMigrationData.password
-    );
-    await downloadPopup.waitForSelector("#excel_download");
-    await downloadPopup.click("#excel_download");
-    await downloadPopup
-      .waitForNetworkIdle()
-      .then(async () => {
-        const fileName = this.getMostRecentFile(this.MIGRATION_DATA_PATH);
-        if (!fileName) throw Error("Failed file download...");
-        fs.renameSync(
-          path.join(this.MIGRATION_DATA_PATH, fileName),
-          path.join(this.MIGRATION_DATA_PATH, `${account.id}_${fileName}`)
+      for (const ele of categoryElements) {
+        // 상품분류 선택 활성화
+        await ele.evaluate((ele: any) => ele.dtnode.activate());
+        await page.waitForSelector(
+          `.dynatree-loading[style^="display: none;"]`
         );
-        console.log("Success donwload file!");
 
-        await downloadPopup.close();
-        await page.close();
-        await browser.close();
-      })
-      .catch((e) => {
-        Promise.all([
-          downloadPopup.close(),
-          page.close(),
-          browser.close(),
-        ]).then(() => {
-          throw Error("Failed file download...");
-        });
-      });
+        // 상품분류정보 가져와 배열의 알맞은 위치에 삽입
+        const { dimension, data } = await ele.evaluate(
+          (ele: any): Cafe24ProductCategoryParsingData => {
+            const _w = window as any;
+            return {
+              dimension: _w.getCategoryDimension(ele),
+              data: {
+                no: parseInt(
+                  _w.$("#eCategoryUrlOpen").text().split("cate_no=")[1]
+                ),
+                title: _w.$("#eCategoryTitle").val(),
+                description: _w.$("#eCategoryDescription").val(),
+                showCategory:
+                  _w.$(`input[name="is_display[1]"]:checked`).val() === "T"
+                    ? true
+                    : false,
+                showMainCategory:
+                  _w.$(`input[name="is_main[1]"]:checked`).val() === "T"
+                    ? true
+                    : false,
+                showPC: Boolean(_w.$(".eSelected #eDisplayTypeP").length),
+                showMobile: Boolean(_w.$(".eSelected #eDisplayTypeM").length),
+                showSoldout:
+                  _w.$(`input[name="show_soldout"]:checked`).val() === "N"
+                    ? true
+                    : false,
+                showChildProduct:
+                  _w.$(`input[name="show_sub_category"]:checked`).val() === "T"
+                    ? true
+                    : false,
+                productSector: _w.$("#eProductClearanceTextbox").val(),
+                allowRobot:
+                  _w.$(`input[name="search_engine_exposure"]:checked`).val() ===
+                  "T"
+                    ? true
+                    : false,
+                seoTitle: _w.$("#meta_title").val(),
+                seoAuthor: _w.$("#meta_author").val(),
+                seoDescription: _w.$("#meta_description").val(),
+                seoKeywords: _w.$("#meta_keywords").val(),
+                childCategory: [],
+              },
+            };
+          }
+        );
+        let tmp = categoryDatas;
+        for (let i = 0; i < dimension; i++) {
+          tmp = tmp[tmp.length - 1].childCategory;
+        }
+        tmp.push(data);
+      }
+
+      // 상품분류정보배열을 JSON파일로 저장
+      const migrationUserDirPath = this.getMigrationUserDirPath(account.id);
+      const categoryJSONFilePath = path.join(
+        migrationUserDirPath,
+        "category.json"
+      );
+      await mkdirp(migrationUserDirPath);
+      fs.writeFileSync(categoryJSONFilePath, JSON.stringify(categoryDatas));
+
+      await page.close();
+      this.printInfoLog(
+        logLabel,
+        `Successed parsing cafe24 category - parsed ${categoryElements.length} categories [saved ${categoryJSONFilePath}]`
+      );
+      return true;
+    } catch (e) {
+      await page.close();
+      this.printErrLog(logLabel, "Failed parsing cafe24 category...");
+      return false;
+    }
   };
 }
 

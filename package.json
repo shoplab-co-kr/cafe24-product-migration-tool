@@ -11,12 +11,15 @@
     "start": "node ."
   },
   "dependencies": {
+    "cheerio": "^1.0.0-rc.12",
     "inquirer": "^8.0.0",
     "mkdirp": "^1.0.4",
     "puppeteer": "^15.5.0",
+    "tslog": "^3.3.3",
     "uuid": "^8.3.2"
   },
   "devDependencies": {
+    "@types/cheerio": "^0.22.31",
     "@types/inquirer": "^8.2.1",
     "@types/mkdirp": "^1.0.2",
     "@types/node": "^18.0.6",
