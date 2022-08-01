@@ -12,20 +12,22 @@ import productMigrater from "./ProductMigrater";
         filter: (val: string) => parseInt(val.split(".")[0]) - 1,
       },
     ])
-    .then(async (answers) => {
-      switch (answers.mode) {
-        case 0:
-          const account = await productMigrater.getCafe24Account();
-          let condition = await productMigrater.runCafe24Login(account);
-          if (condition)
-            condition = await productMigrater.runPasingCafe24Category(account);
+    .then(async (answers: { mode: number }) => {
+      const { mode } = answers;
+      const account = await productMigrater.getCafe24Account();
+      if (mode === 1) await productMigrater.getCafe24MigrationSetting();
 
-          break;
-        case 1:
-          break;
-        default:
-          throw Error("invaild mode.");
-      }
+      let condition = await productMigrater.runCafe24Login(account);
+      if (mode === 0) {
+        if (condition)
+          condition = await productMigrater.runPasingCafe24Category(account);
+        if (condition)
+          condition = await productMigrater.runParsingCafe24ProductCSV(account);
+      } else if (mode === 1) {
+        if (condition)
+          condition = await productMigrater.runMigratingCafe24Category(account);
+      } else throw Error("invaild mode.");
+
       await productMigrater.closeBrowser();
     });
 })();
